@@ -1,6 +1,6 @@
 [package]
 name = "sipmon"
-version = "0.1.17"
+version = "0.1.18"
 edition = "2024"
 description = "Passive SIP/RTP signaling & media quality monitoring (pcap/live, TUI + JSONL export)"
 license = "MIT"
