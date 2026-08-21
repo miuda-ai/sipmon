@@ -1,4 +1,4 @@
-name: Release musl binary
+name: Release binaries
 
 on:
   push:
@@ -10,29 +10,14 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-C target-feature=+crt-static"
+  # Pinned for the zigbuild jobs (musl-aarch64, macos-universal). Must match a
+  # real ziglang.org artifact; 0.15+ uses the <arch>-<os> tarball name order.
+  ZIG_VERSION: 0.16.0
 
 jobs:
-  build:
+  # Portable static Linux/x86_64 — the original musl-gcc path (no zig).
+  build-musl-x86_64:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-musl
-            host: x86_64-linux-musl
-            cc: musl-gcc
-            ar: ar
-            ranlib: ranlib
-            linker: musl-gcc
-            cross_image: ""
-          - target: aarch64-unknown-linux-musl
-            host: aarch64-linux-musl
-            cc: aarch64-linux-musl-gcc
-            ar: aarch64-linux-musl-ar
-            ranlib: aarch64-linux-musl-ranlib
-            linker: aarch64-linux-musl-gcc
-            cross_image: ghcr.io/cross-rs/aarch64-unknown-linux-musl:main
     steps:
       - uses: actions/checkout@v4
 
@@ -41,45 +26,19 @@ jobs:
         with:
           path: |
             ~/.cargo/registry
-            target/${{ matrix.target }}
-          key: musl-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+            target
+          key: musl-x86_64-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
+          targets: x86_64-unknown-linux-musl
 
-      - name: Install musl cross toolchain
+      - name: Install musl toolchain + build tools
         run: |
-          set -euxo pipefail
-          if [ -z "${{ matrix.cross_image }}" ]; then
-            sudo apt-get update
-            sudo apt-get install -y musl-tools make flex bison autoconf automake libtool linux-libc-dev
-            # musl-dev ships no kernel-header symlinks on a fresh runner; point
-            # the musl include dir at linux-libc-dev's UAPI headers so musl-gcc
-            # can find linux/if.h, linux/if_packet.h, etc.
-            sudo ln -sfn /usr/include/linux /usr/include/x86_64-linux-musl/linux
-            sudo ln -sfn /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
-            sudo ln -sfn /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic
-          else
-            sudo apt-get update
-            sudo apt-get install -y make flex bison autoconf automake libtool
-            # Pull the cross-rs aarch64-musl toolchain from ghcr.io (GitHub's
-            # CDN — fast on runners, unlike musl.cc which throttles) and overlay
-            # its /usr/local onto the runner. Extracting to the same absolute
-            # path keeps the gcc driver's internal libexec/sysroot paths valid.
-            docker pull "${{ matrix.cross_image }}"
-            cid=$(docker create "${{ matrix.cross_image }}")
-            docker cp "$cid:/usr/local" /tmp/xlocal
-            docker rm "$cid"
-            sudo cp -a /tmp/xlocal/. /usr/local/
-            ${{ matrix.cc }} --version
-          fi
+          sudo apt-get update
+          sudo apt-get install -y musl-tools make flex bison autoconf automake libtool
 
       - name: Build static libpcap for musl
-        env:
-          CC: ${{ matrix.cc }}
-          AR: ${{ matrix.ar }}
-          RANLIB: ${{ matrix.ranlib }}
         run: |
           set -euxo pipefail
           cd /tmp
@@ -89,60 +48,162 @@ jobs:
             https://github.com/the-tcpdump-group/libpcap libpcap-gh
           cd libpcap-gh
           autoreconf -i
-          # Cross-compiling can't run probe binaries, so force the Linux
-          # PF_PACKET capture type explicitly instead of auto-detecting.
-          ./configure --host=${{ matrix.host }} \
-            --with-pcap=linux \
+          CC=musl-gcc AR=ar RANLIB=ranlib ./configure \
+            --host=x86_64-linux-musl \
             --disable-shared --enable-static \
             --without-libnl --disable-dbus --disable-bluetooth \
-            --disable-usb --without-dag --without-septel --without-snf \
-            --disable-rdma
+            --disable-usb --disable-manual --without-dag \
+            --without-septel --without-snf --disable-rdma --disable-srp
           make -j$(nproc)
-
-      - name: Configure cargo linker
-        run: |
-          key="CARGO_TARGET_$(echo "${{ matrix.target }}" | tr '[:lower:]' '[:upper:]' | tr '-' '_')_LINKER"
-          echo "$key=${{ matrix.linker }}" >> "$GITHUB_ENV"
 
       - name: Build release binary
         env:
           LIBPCAP_LIBDIR: /tmp/libpcap-gh
           LIBPCAP_VER: "1.10.5"
-        run: cargo build --release --target ${{ matrix.target }}
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: cargo build --release --target x86_64-unknown-linux-musl
 
       - name: Verify fully static
         run: |
-          bin="target/${{ matrix.target }}/release/sipmon"
-          file "$bin"
-          case "$(file "$bin")" in
-            *"static-pie linked"*|*"statically linked"*) ;;
+          file target/x86_64-unknown-linux-musl/release/sipmon
+          ldd_output="$(ldd target/x86_64-unknown-linux-musl/release/sipmon 2>&1 || true)"
+          file_output="$(file target/x86_64-unknown-linux-musl/release/sipmon)"
+          case "$ldd_output:$file_output" in
+            *"not a dynamic executable"*) ;;
+            *"statically linked"*) ;;
+            *"static-pie linked"*) ;;
             *) echo "ERROR: binary is not fully static"; exit 1 ;;
           esac
 
       - name: Package
         run: |
-          cd target/${{ matrix.target }}/release
-          cp sipmon sipmon-${{ matrix.target }}
-          sha256sum sipmon-${{ matrix.target }} > sipmon-${{ matrix.target }}.sha256
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: sipmon-${{ matrix.target }}
-          path: |
-            target/${{ matrix.target }}/release/sipmon-${{ matrix.target }}
-            target/${{ matrix.target }}/release/sipmon-${{ matrix.target }}.sha256
-          if-no-files-found: error
-
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
+          cd target/x86_64-unknown-linux-musl/release
+          cp sipmon sipmon-x86_64-unknown-linux-musl
+          sha256sum sipmon-x86_64-unknown-linux-musl \
+            > sipmon-x86_64-unknown-linux-musl.sha256
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          files: |
+            target/x86_64-unknown-linux-musl/release/sipmon-x86_64-unknown-linux-musl
+            target/x86_64-unknown-linux-musl/release/sipmon-x86_64-unknown-linux-musl.sha256
+
+  # Portable static Linux/ARM64 — cross-compiled with zig (no aarch64
+  # toolchain or qemu needed on the x86_64 runner). The Makefile builds the
+  # cross libpcap (cached under ~/.cache/sipmon/pcap-zig, with a github
+  # clone + autoreconf fallback when tcpdump.org is unreachable) and links
+  # via cargo-zigbuild.
+  build-musl-aarch64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry / target / cross libpcap
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+            ~/.cache/sipmon/pcap-zig
+          key: musl-aarch64-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-zig${{ env.ZIG_VERSION }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y make flex bison autoconf automake libtool \
+            git curl xz-utils
+
+      - name: Install zig
+        run: |
+          curl -fsSL \
+            "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
+            | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Build
+        run: make musl-aarch64
+
+      - name: Verify fully static
+        run: |
+          file target/aarch64-unknown-linux-musl/release/sipmon
+          file target/aarch64-unknown-linux-musl/release/sipmon | grep -q \
+            "statically linked" \
+            || { echo "ERROR: binary is not fully static"; exit 1; }
+
+      - name: Package
+        run: |
+          cd target/aarch64-unknown-linux-musl/release
+          cp sipmon sipmon-aarch64-unknown-linux-musl
+          sha256sum sipmon-aarch64-unknown-linux-musl \
+            > sipmon-aarch64-unknown-linux-musl.sha256
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/aarch64-unknown-linux-musl/release/sipmon-aarch64-unknown-linux-musl
+            target/aarch64-unknown-linux-musl/release/sipmon-aarch64-unknown-linux-musl.sha256
+
+  # macOS universal2 (x86_64 + arm64) — zig as the linker, SDK libpcap.
+  build-macos-universal:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry / target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: macos-universal-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-zig${{ env.ZIG_VERSION }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Install zig
+        run: |
+          curl -fsSL \
+            "https://ziglang.org/download/${ZIG_VERSION}/zig-aarch64-macos-${ZIG_VERSION}.tar.xz" \
+            | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-aarch64-macos-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Build
+        run: make macos-universal
+
+      - name: Verify universal2
+        run: |
+          file target/universal2-apple-darwin/release/sipmon
+          file target/universal2-apple-darwin/release/sipmon | grep -q \
+            "2 architectures" \
+            || { echo "ERROR: binary is not universal2"; exit 1; }
+
+      - name: Package
+        run: |
+          cd target/universal2-apple-darwin/release
+          cp sipmon sipmon-universal2-apple-darwin
+          # Ad-hoc signature: arm64 slices refuse to run unsigned once the
+          # binary carries a quarantine attribute (e.g. downloaded from the
+          # release page).
+          codesign --force --sign - sipmon-universal2-apple-darwin
+          shasum -a 256 sipmon-universal2-apple-darwin \
+            > sipmon-universal2-apple-darwin.sha256
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/universal2-apple-darwin/release/sipmon-universal2-apple-darwin
+            target/universal2-apple-darwin/release/sipmon-universal2-apple-darwin.sha256

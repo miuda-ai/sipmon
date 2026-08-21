@@ -28,8 +28,10 @@ pub fn user_of(value: &str) -> Option<String> {
 pub fn apply_sip(call: &mut Call, msg: &SipMsg) {
     call.pkts_sip += 1;
     call.bytes += msg.raw.len() as u64;
+    // Eviction key (bounded-memory): newest activity across SIP + RTP.
     call.last_ts_us = msg.ts_us;
-    call.messages.push(msg.clone());
+    // The message itself is stored by the caller (`ingest_sip`) via a move, so
+    // the full-SipMsg clone that used to happen here is gone.
 
     // Populate identities from the first INVITE if not set.
     if matches!(msg.method, Some(Method::Invite)) {

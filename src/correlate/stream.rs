@@ -64,6 +64,7 @@ impl RtpStream {
         }
     }
 
+    #[inline]
     pub fn observe(&mut self, ts_us: u64, header: crate::decode::rtp::RtpHeader, len: usize) {
         if self.first_ts_us.is_none() {
             self.first_ts_us = Some(ts_us);

@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 use crate::diagnostics::Diagnostic;
 use crate::model::media::StreamSummary;
@@ -185,14 +187,16 @@ pub struct Snapshot {
 /// In-memory application state. Updated by the pipeline thread, snapshotted by
 /// the UI/export thread.
 pub struct Registry {
-    pub calls: HashMap<String, Call>,
+    pub calls: FxHashMap<String, Call>,
     /// Insertion order for stable recent-first listing.
     pub order: Vec<String>,
-    pub streams: HashMap<StreamKey, crate::correlate::stream::RtpStream>,
+    pub streams: FxHashMap<StreamKey, crate::correlate::stream::RtpStream>,
     /// call_id per stream (reverse lookup).
-    pub stream_call: HashMap<StreamKey, String>,
-    /// SDP-advertised media endpoint -> call_id (for RTP association).
-    pub endpoint_call: HashMap<std::net::SocketAddr, String>,
+    pub stream_call: FxHashMap<StreamKey, String>,
+    /// SDP-advertised media endpoint -> call_id (for RTP association). Looked
+    /// up only on the new-stream slow path (`observe_existing_rtp` handles
+    /// known streams without it), so a plain String value is fine.
+    pub endpoint_call: FxHashMap<std::net::SocketAddr, String>,
     pub events: VecDeque<String>,
     pub source: String,
     pub start_us: Option<u64>,
@@ -231,9 +235,11 @@ pub struct Registry {
     pub heatmap_retain_us: u64,
     /// Per-call stream index (call_id -> stream keys): keeps per-packet and
     /// per-call paths O(streams-in-call) instead of O(total streams).
-    pub stream_index: HashMap<String, Vec<StreamKey>>,
-    /// SSRC -> stream keys: O(1) RTCP sample attachment (no full scan).
-    pub ssrc_index: HashMap<u32, Vec<StreamKey>>,
+    pub stream_index: FxHashMap<String, Vec<StreamKey>>,
+    /// SSRC -> stream keys: O(1) RTCP sample attachment (no full scan). The
+    /// same SSRC almost always maps to ≤2 streams, so inline storage avoids a
+    /// heap alloc on the RTCP path.
+    pub ssrc_index: FxHashMap<u32, SmallVec<[StreamKey; 2]>>,
     /// Per-IP packet/loss statistics (updated on the RTP hot path + 5s flush).
     pub ipstats: IpStatsStore,
     /// Per-IP SIP signaling statistics (SIP Stats page).
@@ -255,11 +261,11 @@ pub const SEARCH_PIN_MAX: usize = 1000;
 impl Default for Registry {
     fn default() -> Self {
         Self {
-            calls: HashMap::new(),
+            calls: FxHashMap::default(),
             order: Vec::new(),
-            streams: HashMap::new(),
-            stream_call: HashMap::new(),
-            endpoint_call: HashMap::new(),
+            streams: FxHashMap::default(),
+            stream_call: FxHashMap::default(),
+            endpoint_call: FxHashMap::default(),
             events: VecDeque::with_capacity(512),
             source: String::new(),
             start_us: None,
@@ -277,8 +283,8 @@ impl Default for Registry {
             focus_hint: None,
             search_hint: None,
             search_matches: Vec::new(),
-            stream_index: HashMap::new(),
-            ssrc_index: HashMap::new(),
+            stream_index: FxHashMap::default(),
+            ssrc_index: FxHashMap::default(),
             ipstats: IpStatsStore::new(),
             sipstats: crate::store::sipstats::SipStatsStore::new(),
             imported_streams: HashMap::new(),
@@ -681,13 +687,44 @@ impl Registry {
     }
 
     pub fn snapshot_with(&self, limit: usize, stream_limit: usize) -> Snapshot {
+        // Summarize each stream exactly once and reuse everywhere: the
+        // aggregate averages (over ALL streams), the bounded `streams`
+        // snapshot Vec, and the per-call aggregates below (which used to
+        // re-run the full summary() per stream per call just to read .mos).
+        let stream_summaries: Vec<_> = self.streams.values().map(|s| s.summary()).collect();
+        // Per-call live-stream aggregates from that single pass: min MOS +
+        // stream count, keyed by borrowed call-id (no String clones).
+        let mut live_by_call: FxHashMap<&str, (Option<f64>, usize)> = FxHashMap::default();
+        for st in &stream_summaries {
+            if let Some(cid) = st.call_id.as_deref() {
+                let e = live_by_call.entry(cid).or_insert((None, 0));
+                e.1 += 1;
+                if let Some(m) = st.mos {
+                    e.0 = Some(e.0.map_or(m, |a: f64| a.min(m)));
+                }
+            }
+        }
+        // Imported (replay/jsonl) summaries grouped once per publish instead
+        // of a linear scan per call (O(calls × imported) -> O(imported)).
+        let mut imported_by_call: FxHashMap<&str, Vec<&StreamSummary>> = FxHashMap::default();
+        for (k, s) in &self.imported_streams {
+            imported_by_call.entry(k.call_id.as_str()).or_default().push(s);
+        }
         let mut summaries: Vec<CallSummary> = self
             .order
             .iter()
             .rev()
             .take(limit)
             .filter_map(|id| self.calls.get(id))
-            .map(|c| self.summarize(c))
+            .map(|c| {
+                self.summarize(
+                    c,
+                    live_by_call.get(c.call_id.as_str()),
+                    imported_by_call
+                        .get(c.call_id.as_str())
+                        .map(|v| v.as_slice()),
+                )
+            })
             .collect();
 
         // Search-pinned calls stay visible even when they have fallen out of
@@ -704,7 +741,11 @@ impl Registry {
                     continue;
                 }
                 if let Some(c) = self.calls.get(id) {
-                    summaries.push(self.summarize(c));
+                    summaries.push(self.summarize(
+                        c,
+                        live_by_call.get(c.call_id.as_str()),
+                        imported_by_call.get(c.call_id.as_str()).map(|v| v.as_slice()),
+                    ));
                 }
             }
         }
@@ -741,8 +782,8 @@ impl Registry {
         let mut mos_n = 0u64;
         let mut rtt = 0.0;
         let mut rtt_n = 0u64;
-        for s in self.streams.values() {
-            let st = s.summary();
+        // Summarize each stream exactly once (above); fold the aggregates.
+        for st in &stream_summaries {
             if let Some(j) = st.jitter_ms {
                 jit += j;
                 jit_n += 1;
@@ -809,11 +850,9 @@ impl Registry {
             asr,
             calls: summaries,
             streams: {
-                let mut s: Vec<_> = self
-                    .streams
-                    .values()
+                let mut s: Vec<_> = stream_summaries
+                    .into_iter()
                     .take(stream_limit)
-                    .map(|s| s.summary())
                     .collect();
                 let remaining = stream_limit.saturating_sub(s.len());
                 s.extend(self.imported_streams.values().take(remaining).cloned());
@@ -912,19 +951,28 @@ impl Registry {
         })
     }
 
-    fn summarize(&self, c: &Call) -> CallSummary {
-        let keys = self.call_stream_keys(&c.call_id);
-        let imported: Vec<&StreamSummary> = self.imported_for_call(&c.call_id).collect();
-        let best_mos = keys
-            .iter()
-            .filter_map(|k| self.streams.get(k))
-            .filter_map(|s| s.summary().mos)
-            .chain(imported.iter().filter_map(|s| s.mos))
-            .fold(None, |acc: Option<f64>, m| {
-                Some(acc.map_or(m, |a| a.min(m)))
-            });
-        let stream_count = keys.len() + imported.len();
-        let imported_pkts_rtp: u64 = imported.iter().map(|s| s.packets).sum();
+    /// Build a `CallSummary`. `live` carries (min MOS, stream count) for the
+    /// call's live RTP streams and `imported` the replayed summaries, both
+    /// precomputed once per snapshot from the single per-stream `summary()`
+    /// pass (see `snapshot_with`) — re-deriving them here would re-run the
+    /// full summary per stream per call on every publish.
+    fn summarize(
+        &self,
+        c: &Call,
+        live: Option<&(Option<f64>, usize)>,
+        imported: Option<&[&StreamSummary]>,
+    ) -> CallSummary {
+        let (mut best_mos, mut stream_count) = live.copied().unwrap_or((None, 0));
+        let mut pkts_rtp = c.pkts_rtp;
+        if let Some(v) = imported {
+            stream_count += v.len();
+            pkts_rtp += v.iter().map(|s| s.packets).sum::<u64>();
+            for s in v {
+                if let Some(m) = s.mos {
+                    best_mos = Some(best_mos.map_or(m, |a: f64| a.min(m)));
+                }
+            }
+        }
         CallSummary {
             call_id: c.call_id.clone(),
             from_user: c.from_user.clone(),
@@ -943,7 +991,7 @@ impl Registry {
             hangup_by: c.hangup_by,
             hangup_code: c.hangup.code,
             pkts_sip: c.pkts_sip,
-            pkts_rtp: c.pkts_rtp + imported_pkts_rtp,
+            pkts_rtp,
             best_mos,
             warn_count: c.warn_count,
             critical_count: c.critical_count,
@@ -998,7 +1046,7 @@ fn sip_header(raw: &[u8], name: &str) -> Option<String> {
 /// Returns (per-message legs, number of distinct legs). Messages without any
 /// tag key collapse into leg 0.
 fn dialog_legs(msgs: &[SipMsg]) -> (Vec<u8>, u8) {
-    let mut leg_of: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
+    let mut leg_of: FxHashMap<String, u8> = FxHashMap::default();
     let legs: Vec<u8> = msgs
         .iter()
         .map(|m| {
@@ -1022,8 +1070,8 @@ fn dialog_legs(msgs: &[SipMsg]) -> (Vec<u8>, u8) {
 /// The one IP shared by the flows of both the first two legs — i.e. the
 /// B2BUA/SBC in a same-Call-ID dual-dialog split. None when ambiguous.
 fn common_flow_ip(msgs: &[SipMsg], legs: &[u8]) -> Option<std::net::IpAddr> {
-    let mut by_leg: std::collections::HashMap<u8, Vec<std::net::IpAddr>> =
-        std::collections::HashMap::new();
+    let mut by_leg: FxHashMap<u8, Vec<std::net::IpAddr>> =
+        FxHashMap::default();
     for (m, l) in msgs.iter().zip(legs) {
         by_leg
             .entry(*l)

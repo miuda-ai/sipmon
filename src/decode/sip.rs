@@ -25,12 +25,24 @@ fn map_method(m: &sip::Method) -> Method {
     }
 }
 
-/// Extract the value of a `;name=value` parameter from a header string.
+/// Extract the value of a `;name=value` parameter from a header value,
+/// case-insensitively. Scans the original bytes directly: the old version
+/// lowercased the whole
+/// value and built a `format!` needle — two allocations per call, several
+/// calls per SIP message. A window matching the ASCII name case-insensitively
+/// is necessarily at a UTF-8 boundary (continuation bytes are >= 0x80 and
+/// never match ASCII), so slicing at the match is safe.
 fn param<'a>(value: &'a str, name: &str) -> Option<&'a str> {
-    let lower = value.to_ascii_lowercase();
-    let needle = format!("{name}=");
-    let idx = lower.find(&needle)?;
-    let start = idx + needle.len();
+    let v = value.as_bytes();
+    let n = name.as_bytes();
+    let mut idx = None;
+    for i in 0..v.len().saturating_sub(n.len()) {
+        if v[i..i + n.len()].eq_ignore_ascii_case(n) && v.get(i + n.len()) == Some(&b'=') {
+            idx = Some(i);
+            break;
+        }
+    }
+    let start = idx? + n.len() + 1;
     let rest = &value[start..];
     let end = rest
         .find([';', ' ', '\t', '\r', '\n'])
@@ -192,4 +204,41 @@ fn extract_sockaddr(value: &str) -> Option<std::net::SocketAddr> {
     }
     .trim();
     hostport.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::param;
+
+    #[test]
+    fn param_matches_name_case_insensitively() {
+        assert_eq!(param("branch=z9hG4bK1;received=10.0.0.1", "Branch"), Some("z9hG4bK1"));
+        assert_eq!(param("FROM-TAG=a;to-tag=b", "To-Tag"), Some("b"));
+    }
+
+    #[test]
+    fn param_terminators_and_end_of_value() {
+        assert_eq!(param("a=1;b=2", "b"), Some("2")); // ';'
+        assert_eq!(param("a=1 b=2", "b"), Some("2")); // ' '
+        assert_eq!(param("a=1\tb=2", "b"), Some("2")); // tab
+        assert_eq!(param("x=99", "x"), Some("99")); // end of value
+    }
+
+    #[test]
+    fn param_unquotes_value() {
+        assert_eq!(param("uri=\"sip:alice@x\";tag=1", "uri"), Some("sip:alice@x"));
+    }
+
+    #[test]
+    fn param_requires_equals_after_name() {
+        // "tagx" must not satisfy a lookup for "tag".
+        assert_eq!(param("tagx=1;tag=2", "tag"), Some("2"));
+        assert_eq!(param("only=a", "missing"), None);
+    }
+
+    #[test]
+    fn param_handles_multibyte_before_match() {
+        // Non-ASCII prefix must not panic or misalign the match.
+        assert_eq!(param("café=1;tag=ok", "tag"), Some("ok"));
+    }
 }

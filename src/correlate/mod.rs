@@ -101,6 +101,14 @@ impl Correlator {
         std::mem::take(&mut self.pending_events)
     }
 
+    /// Drain pending events into `out` (cleared first). Unlike `take_events`
+    /// the vector keeps its capacity across calls, so the per-frame hot drain
+    /// stops regrowing a Vec from zero after the first batch.
+    pub fn drain_events_into(&mut self, out: &mut Vec<crate::store::evlog::Event>) {
+        out.clear();
+        out.append(&mut self.pending_events);
+    }
+
     /// Replay does not write an evlog; skip building records that would be
     /// thrown away (most importantly a clone of every SIP message's raw bytes).
     pub fn disable_evlog_emit(&mut self) {
@@ -426,8 +434,26 @@ impl Correlator {
         // Apply state machine.
         let call = self.reg.get_or_create_call(&call_id);
         crate::correlate::call::apply_sip(call, &msg);
-        // Bound per-call message retention (a pathological long-lived call must
-        // not grow without limit; focus detail already caps at 1000 for display).
+        // Assemble the evlog event from &msg first (Copy fields + string/raw
+        // clones), leaving msg whole for the move below — the full-SipMsg clone
+        // that used to live in apply_sip is gone.
+        let evt = crate::store::evlog::Event::SipMsg(crate::store::evlog::SipMsgEvt {
+            ts_us: ts,
+            flow: msg.flow,
+            is_request: msg.is_request,
+            method: msg.method.map(|m| m.name().to_string()),
+            status: msg.status,
+            call_id: msg.call_id.clone(),
+            cseq: msg.cseq,
+            branch: msg.branch.clone(),
+            from_tag: msg.from_tag.clone(),
+            to_tag: msg.to_tag.clone(),
+            raw: msg.raw.to_vec(),
+        });
+        // Store the message by move; bound per-call message retention (a
+        // pathological long-lived call must not grow without limit; focus
+        // detail already caps at 1000 for display).
+        call.messages.push(msg);
         const MAX_MSGS_PER_CALL: usize = 2000;
         if call.messages.len() > MAX_MSGS_PER_CALL {
             let excess = call.messages.len() - MAX_MSGS_PER_CALL;
@@ -463,22 +489,8 @@ impl Correlator {
             self.apply_sdp_clocks(&call_id);
         }
 
-        // Evlog: record the SIP message (raw optionally truncated upstream).
-        self.push_ev(crate::store::evlog::Event::SipMsg(
-            crate::store::evlog::SipMsgEvt {
-                ts_us: ts,
-                flow: msg.flow,
-                is_request: msg.is_request,
-                method: msg.method.map(|m| m.name().to_string()),
-                status: msg.status,
-                call_id: msg.call_id.clone(),
-                cseq: msg.cseq,
-                branch: msg.branch.clone(),
-                from_tag: msg.from_tag.clone(),
-                to_tag: msg.to_tag.clone(),
-                raw: msg.raw.to_vec(),
-            },
-        ));
+        // Evlog: emit the pre-assembled SIP message event.
+        self.push_ev(evt);
 
         // Apply diagnostics (counts + ring).
         for d in new_diags {
@@ -771,12 +783,13 @@ impl Correlator {
             _ => 0,
         };
         if ssrc != 0
-            && let Some(c) = self
+            && let Some(cid) = self
                 .reg
-                .streams
-                .values()
-                .find(|s| s.ssrc == ssrc)
-                .and_then(|s| self.reg.calls.get_mut(&s.call_id))
+                .ssrc_index
+                .get(&ssrc)
+                .and_then(|keys| keys.first().copied())
+                .and_then(|key| self.reg.streams.get(&key).map(|s| s.call_id.clone()))
+            && let Some(c) = self.reg.calls.get_mut(&cid)
         {
             c.pkts_rtcp += 1;
             c.last_ts_us = ts;
@@ -830,7 +843,12 @@ impl Correlator {
         }
         for (ssrc, rtt, oneway) in samples {
             // O(1) attachment via the SSRC index (no full-stream scan).
-            let keys: Vec<StreamKey> = self.reg.ssrc_index.get(&ssrc).cloned().unwrap_or_default();
+            let keys = self
+                .reg
+                .ssrc_index
+                .get(&ssrc)
+                .map(|v| v.iter().copied().collect::<Vec<_>>())
+                .unwrap_or_default();
             let mut call_id = None;
             for key in &keys {
                 if let Some(s) = self.reg.streams.get_mut(key) {

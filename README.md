@@ -41,6 +41,53 @@ sipmon out.jsonl
 tcpdump -i eth0 -w - | sipmon -    # read a live tcpdump stream
 ```
 
+## Capturing rtpengine (kernel-forwarded) media
+
+With rtpengine's kernel forwarding enabled (`xt_RTPENGINE`), RTP is rewritten and
+forwarded inside netfilter — rtpengine's own sockets only see the first
+packet(s) of each flow and RTCP. Capturing **on the sockets** is therefore not
+an option, but the packets still traverse the NIC and the kernel input/output
+paths, so **passive capture works unchanged**: AF_PACKET (`sipmon live -i any`)
+and switch mirror ports both see the two legs of every stream — the original
+ingress (A → rtpengine:port) and the rewritten egress (rtpengine:port → B).
+sipmon models rtpengine as a media relay: the SDP advertises rtpengine's media
+endpoints, so both legs correlate to the same Call-ID (two directed streams per
+call; SSRC is preserved end-to-end unless transcoding is enabled, in which case
+each leg appears as its own stream).
+
+**Topology 1 — Kamailio + rtpengine on the same host:**
+
+```sh
+sudo sipmon live -i any -f "udp portrange 30000-40000 or udp port 5060"
+```
+
+Adjust `30000-40000` to the `port-min`/`port-max` of your `rtpengine.conf`. The
+BPF pre-filter is strongly recommended on a shared host — it keeps the capture
+out of control-plane traffic and cuts CPU.
+
+**Topology 2 — Kamailio on a separate host:** sipmon correlates RTP to calls
+via SIP/SDP, so SIP must reach the same capture. Mirror Kamailio's SIP onto a
+spare NIC of the rtpengine host (a SPAN destination port with no IP configured
+is fine) and keep `live -i any` — local RTP and mirrored SIP then feed the same
+correlator.
+
+**Before going live**, verify both legs are observable on your kernel/driver:
+
+```sh
+sudo tools/check-rtp-capture.sh                 # 15s capture + leg analysis
+sipmon file -r /tmp/rtp-check.pcap              # offline correlation check
+```
+
+Acceptance: calls appear on the Overview page, each call shows two directed RTP
+streams on the Streams page, and RTCP-derived RTT is populated. If the script
+reports the rewritten egress leg missing (exit 1), capture via a switch mirror
+port instead — mirroring is unaffected by the kernel forwarding path.
+
+Caveats: on a busy relay the capture process competes with rtpengine for CPU
+(prefilter hard, or mirror to a dedicated box at high packet rates — see the
+performance notes in `docs/`); with transcoding enabled rtpengine rewrites the
+SSRC per leg, so quality views split per leg (expected for a transcoder).
+
 ## Commands
 
 | Command | Description |

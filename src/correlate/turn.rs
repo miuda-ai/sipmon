@@ -2,7 +2,7 @@
 //! request/response, relays via XOR-RELAYED-ADDRESS, channel bindings, and
 //! emits diagnostics for allocation failures / relay usage / per-leg quality.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::net::{IpAddr, SocketAddr};
 
 use crate::decode::stun::{self, StunClass};
@@ -20,7 +20,7 @@ pub struct TurnAlloc {
     pub created_at_us: u64,
     pub last_refresh_us: u64,
     /// Channel number -> peer address (learned from ChannelBind).
-    pub channels: HashMap<u16, SocketAddr>,
+    pub channels: FxHashMap<u16, SocketAddr>,
 }
 
 /// Leg classification for a relayed media flow.
@@ -52,11 +52,11 @@ pub enum Encap {
 
 pub struct TurnTracker {
     /// Keyed by client control endpoint.
-    pub allocs: HashMap<SocketAddr, TurnAlloc>,
+    pub allocs: FxHashMap<SocketAddr, TurnAlloc>,
     /// Configured + auto-learned TURN server IPs (bounded).
-    pub turn_servers: HashSet<IpAddr>,
+    pub turn_servers: FxHashSet<IpAddr>,
     /// All learned relayed (server:relay_port) addresses (bounded).
-    pub relays: HashSet<SocketAddr>,
+    pub relays: FxHashSet<SocketAddr>,
     pub pkts_turn: u64,
 }
 
@@ -67,14 +67,14 @@ const MAX_SERVERS: usize = 512;
 
 impl TurnTracker {
     pub fn new(configured: &[IpAddr]) -> Self {
-        let mut servers: HashSet<IpAddr> = configured.iter().copied().collect();
+        let mut servers: FxHashSet<IpAddr> = configured.iter().copied().collect();
         if servers.len() > MAX_SERVERS {
             servers = servers.into_iter().take(MAX_SERVERS).collect();
         }
         Self {
-            allocs: HashMap::new(),
+            allocs: FxHashMap::default(),
             turn_servers: servers,
-            relays: HashSet::new(),
+            relays: FxHashSet::default(),
             pkts_turn: 0,
         }
     }
@@ -194,7 +194,7 @@ impl TurnTracker {
                         lifetime: 0,
                         created_at_us: ts,
                         last_refresh_us: ts,
-                        channels: HashMap::new(),
+                        channels: FxHashMap::default(),
                     },
                 );
             }

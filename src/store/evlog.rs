@@ -308,104 +308,107 @@ fn write_sockaddr(buf: &mut Vec<u8>, sa: &SocketAddr) {
     buf.extend_from_slice(&sa.port().to_be_bytes());
 }
 
-fn encode_event_payload(ev: &Event) -> (EvType, Vec<u8>) {
-    let mut buf = Vec::new();
+/// Encode one event's payload into the caller's (reused) buffer. Returning
+/// a fresh `Vec<u8>` per event used to cost one allocation per record on the
+/// capture path.
+fn encode_event_payload(buf: &mut Vec<u8>, ev: &Event) -> EvType {
+    buf.clear();
     match ev {
         Event::SipMsg(e) => {
-            write_flow(&mut buf, &e.flow);
+            write_flow(buf, &e.flow);
             buf.push(e.is_request as u8);
-            write_opt_string(&mut buf, &e.method);
-            write_opt_u16(&mut buf, e.status);
-            write_string(&mut buf, &e.call_id);
-            write_opt_u32(&mut buf, e.cseq);
-            write_opt_string(&mut buf, &e.branch);
-            write_opt_string(&mut buf, &e.from_tag);
-            write_opt_string(&mut buf, &e.to_tag);
-            write_bytes(&mut buf, &e.raw);
-            (EvType::SipMsg, buf)
+            write_opt_string(buf, &e.method);
+            write_opt_u16(buf, e.status);
+            write_string(buf, &e.call_id);
+            write_opt_u32(buf, e.cseq);
+            write_opt_string(buf, &e.branch);
+            write_opt_string(buf, &e.from_tag);
+            write_opt_string(buf, &e.to_tag);
+            write_bytes(buf, &e.raw);
+            EvType::SipMsg
         }
         Event::Txn(e) => {
-            write_string(&mut buf, &e.call_id);
-            write_string(&mut buf, &e.branch);
-            write_string(&mut buf, &e.method);
-            write_opt_u16(&mut buf, e.response_code);
-            write_opt_u32(&mut buf, e.delay_ms);
-            (EvType::Txn, buf)
+            write_string(buf, &e.call_id);
+            write_string(buf, &e.branch);
+            write_string(buf, &e.method);
+            write_opt_u16(buf, e.response_code);
+            write_opt_u32(buf, e.delay_ms);
+            EvType::Txn
         }
         Event::Call(e) => {
-            write_string(&mut buf, &e.call_id);
+            write_string(buf, &e.call_id);
             buf.push(e.kind as u8);
-            write_opt_string(&mut buf, &e.from_user);
-            write_opt_string(&mut buf, &e.to_user);
-            write_opt_string(&mut buf, &e.from_uri);
-            write_opt_string(&mut buf, &e.to_uri);
+            write_opt_string(buf, &e.from_user);
+            write_opt_string(buf, &e.to_user);
+            write_opt_string(buf, &e.from_uri);
+            write_opt_string(buf, &e.to_uri);
             buf.push(e.state);
             buf.push(e.outcome);
-            write_opt_u64(&mut buf, e.invite_ts);
-            write_opt_u64(&mut buf, e.trying_ts);
-            write_opt_u64(&mut buf, e.ringing_ts);
-            write_opt_u64(&mut buf, e.answer_ts);
-            write_opt_u64(&mut buf, e.bye_ts);
-            write_opt_u64(&mut buf, e.end_ts);
-            write_opt_u32(&mut buf, e.pdd_ms);
-            write_opt_u32(&mut buf, e.setup_ms);
-            write_opt_u32(&mut buf, e.hangup_code);
-            write_opt_string(&mut buf, &e.hangup_reason);
-            write_varint(&mut buf, e.pkts_sip);
-            write_varint(&mut buf, e.pkts_rtp);
-            write_varint(&mut buf, e.pkts_rtcp);
-            write_varint(&mut buf, e.bytes);
-            (EvType::Call, buf)
+            write_opt_u64(buf, e.invite_ts);
+            write_opt_u64(buf, e.trying_ts);
+            write_opt_u64(buf, e.ringing_ts);
+            write_opt_u64(buf, e.answer_ts);
+            write_opt_u64(buf, e.bye_ts);
+            write_opt_u64(buf, e.end_ts);
+            write_opt_u32(buf, e.pdd_ms);
+            write_opt_u32(buf, e.setup_ms);
+            write_opt_u32(buf, e.hangup_code);
+            write_opt_string(buf, &e.hangup_reason);
+            write_varint(buf, e.pkts_sip);
+            write_varint(buf, e.pkts_rtp);
+            write_varint(buf, e.pkts_rtcp);
+            write_varint(buf, e.bytes);
+            EvType::Call
         }
         Event::StreamSnap(e) => {
-            write_string(&mut buf, &e.call_id);
+            write_string(buf, &e.call_id);
             buf.extend_from_slice(&e.ssrc.to_be_bytes());
-            write_flow(&mut buf, &e.flow);
-            write_opt_string(&mut buf, &e.codec);
-            write_opt_u8(&mut buf, e.payload_type);
-            write_varint(&mut buf, e.packets);
-            write_varint(&mut buf, e.lost);
-            write_varint(&mut buf, e.expected);
-            write_f64(&mut buf, e.loss_pct);
-            write_opt_f64(&mut buf, e.jitter_ms);
-            write_opt_f64(&mut buf, e.mos);
-            write_opt_string(&mut buf, &e.direction);
+            write_flow(buf, &e.flow);
+            write_opt_string(buf, &e.codec);
+            write_opt_u8(buf, e.payload_type);
+            write_varint(buf, e.packets);
+            write_varint(buf, e.lost);
+            write_varint(buf, e.expected);
+            write_f64(buf, e.loss_pct);
+            write_opt_f64(buf, e.jitter_ms);
+            write_opt_f64(buf, e.mos);
+            write_opt_string(buf, &e.direction);
             // v1.1+ fields (readers tolerate their absence in older logs).
-            write_varint(&mut buf, e.bytes);
-            write_opt_u64(&mut buf, e.first_ts_us);
-            write_opt_u64(&mut buf, e.last_ts_us);
-            write_opt_f64(&mut buf, e.rtt_min_ms);
-            write_opt_f64(&mut buf, e.rtt_avg_ms);
-            write_opt_f64(&mut buf, e.rtt_max_ms);
-            write_opt_f64(&mut buf, e.oneway_ms);
-            write_opt_string(&mut buf, &e.leg);
+            write_varint(buf, e.bytes);
+            write_opt_u64(buf, e.first_ts_us);
+            write_opt_u64(buf, e.last_ts_us);
+            write_opt_f64(buf, e.rtt_min_ms);
+            write_opt_f64(buf, e.rtt_avg_ms);
+            write_opt_f64(buf, e.rtt_max_ms);
+            write_opt_f64(buf, e.oneway_ms);
+            write_opt_string(buf, &e.leg);
             buf.push(e.via_turn as u8);
-            (EvType::StreamSnap, buf)
+            EvType::StreamSnap
         }
         Event::RtcpRtt(e) => {
-            write_string(&mut buf, &e.call_id);
+            write_string(buf, &e.call_id);
             buf.extend_from_slice(&e.ssrc.to_be_bytes());
-            write_f64(&mut buf, e.rtt_ms);
-            write_opt_f64(&mut buf, e.oneway_ms);
-            (EvType::RtcpRtt, buf)
+            write_f64(buf, e.rtt_ms);
+            write_opt_f64(buf, e.oneway_ms);
+            EvType::RtcpRtt
         }
         Event::HealthBucket(e) => {
-            write_varint(&mut buf, e.bucket_us);
-            write_string(&mut buf, &e.dim_key);
-            write_metric_set(&mut buf, &e.metrics);
-            (EvType::HealthBucket, buf)
+            write_varint(buf, e.bucket_us);
+            write_string(buf, &e.dim_key);
+            write_metric_set(buf, &e.metrics);
+            EvType::HealthBucket
         }
         Event::Error(e) => {
-            write_string(&mut buf, &e.kind);
-            write_string(&mut buf, &e.msg);
-            (EvType::Error, buf)
+            write_string(buf, &e.kind);
+            write_string(buf, &e.msg);
+            EvType::Error
         }
         Event::Diag(e) => {
-            write_string(&mut buf, &e.call_id);
+            write_string(buf, &e.call_id);
             buf.push(e.severity);
-            write_string(&mut buf, &e.code);
-            write_string(&mut buf, &e.message);
-            (EvType::Diag, buf)
+            write_string(buf, &e.code);
+            write_string(buf, &e.message);
+            EvType::Diag
         }
     }
 }
@@ -432,6 +435,11 @@ pub struct EvlogWriter<W: Write + Send> {
     w: BufWriter<W>,
     last_ts: u64,
     bytes_written: u64,
+    /// Reused encode buffers: payload first, then the framed record (header +
+    /// payload). Both live for the writer's lifetime, so steady-state record
+    /// writes allocate nothing (the old path built two Vecs per event).
+    payload_buf: Vec<u8>,
+    rec_buf: Vec<u8>,
 }
 
 impl EvlogWriter<File> {
@@ -462,19 +470,23 @@ impl<W: Write + Send> EvlogWriter<W> {
             w: bw,
             last_ts: 0,
             bytes_written: 0,
+            payload_buf: Vec::new(),
+            rec_buf: Vec::new(),
         })
     }
 
     pub fn write(&mut self, ev: &Event) -> Result<()> {
         let ts = ev.ts_us();
-        let (ty, payload) = encode_event_payload(ev);
+        let ty = encode_event_payload(&mut self.payload_buf, ev);
         let delta = ts.saturating_sub(self.last_ts);
-        let mut rec = Vec::with_capacity(16 + payload.len());
-        write_varint(&mut rec, delta);
+        let rec = &mut self.rec_buf;
+        rec.clear();
+        rec.reserve(16 + self.payload_buf.len());
+        write_varint(rec, delta);
         rec.push(ty as u8);
-        write_varint(&mut rec, payload.len() as u64);
-        rec.extend_from_slice(&payload);
-        self.w.write_all(&rec)?;
+        write_varint(rec, self.payload_buf.len() as u64);
+        rec.extend_from_slice(&self.payload_buf);
+        self.w.write_all(rec)?;
         self.last_ts = ts;
         self.bytes_written += rec.len() as u64;
         Ok(())

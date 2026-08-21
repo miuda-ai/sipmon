@@ -14,6 +14,7 @@ pub fn is_rtp_like(payload: &[u8]) -> bool {
     payload.len() >= 2 && (payload[0] >> 6) == 2
 }
 
+#[inline]
 pub fn parse_rtp_header(payload: &[u8]) -> Option<RtpHeader> {
     if payload.len() < 12 || (payload[0] >> 6) != 2 {
         return None;

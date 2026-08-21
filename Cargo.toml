@@ -16,8 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 # CLI / runtime
-clap = { version = "4.5", features = ["derive"] }
-tokio = { version = "1", features = ["full"] }
+clap = { version = "4.6", features = ["derive"] }
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
@@ -27,13 +26,16 @@ bytes = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-dashmap = "6"
+# faster hashing for hot-path maps (Registry / Correlator / ipstats / heatmap)
+rustc-hash = "2"
+# inline storage for small indices (e.g. ssrc_index entries, almost always <=2)
+smallvec = "1"
 # decode
 etherparse = "0.16"
 # SIP parsing (parser + message model only; no network stack)
-rsipstack = "0.6.2"
+rsipstack = "0.6.4"
 # capture
-pcap = "2.4"
+pcap = "2.5"
 # daemonization / signal handling (record -d)
 libc = "0.2"
 # TUI
@@ -47,3 +49,4 @@ serde_json = "1"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+panic = "abort"

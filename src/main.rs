@@ -601,6 +601,9 @@ fn run_capture_loop(
     let handle = std::thread::spawn(move || {
         let mut corr = corr;
         let mut writer = writer;
+        // Reused event buffer for the hot drain (Correlator::drain_events_into
+        // keeps its capacity across frames instead of regrowing a Vec).
+        let mut evbuf: Vec<store::evlog::Event> = Vec::new();
         // Shutdown signal: unblocks capture and lets the loop exit.
         source.set_stop(shared2.quit.clone());
         // Idle-skip bookkeeping: republish only when traffic or focus changed.
@@ -634,9 +637,10 @@ fn run_capture_loop(
                     // UI/export sees the complete capture.
                     exhausted = true;
                     corr.maybe_periodic_flush(corr.reg.last_us.unwrap_or(0));
-                    for ev in corr.take_events() {
+                    corr.drain_events_into(&mut evbuf);
+                    for ev in &evbuf {
                         if let Some(w) = writer.as_mut() {
-                            let _ = w.write(&ev);
+                            let _ = w.write(ev);
                         }
                     }
                     flush_recorder(&mut writer, &shared2.record);
@@ -661,12 +665,13 @@ fn run_capture_loop(
             corr.maybe_periodic_flush(ts);
 
             // Drain evlog events.
-            for ev in corr.take_events() {
+            corr.drain_events_into(&mut evbuf);
+            for ev in &evbuf {
                 if print_events {
-                    print_event(&ev);
+                    print_event(ev);
                 }
                 if let Some(w) = writer.as_mut() {
-                    let _ = w.write(&ev);
+                    let _ = w.write(ev);
                 }
             }
 
@@ -703,9 +708,10 @@ fn run_capture_loop(
             }
         }
         corr.maybe_periodic_flush(corr.reg.last_us.unwrap_or(0));
-        for ev in corr.take_events() {
+        corr.drain_events_into(&mut evbuf);
+        for ev in &evbuf {
             if let Some(w) = writer.as_mut() {
-                let _ = w.write(&ev);
+                let _ = w.write(ev);
             }
         }
         flush_recorder(&mut writer, &shared2.record);

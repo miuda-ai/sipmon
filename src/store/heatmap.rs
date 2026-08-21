@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use crate::model::stats::MetricSet;
 
@@ -6,14 +6,14 @@ use crate::model::stats::MetricSet;
 pub struct Heatmap {
     bucket_secs: u64,
     /// bucket_index_us -> key -> metrics.
-    cells: HashMap<u64, HashMap<String, MetricSet>>,
+    cells: FxHashMap<u64, FxHashMap<String, MetricSet>>,
 }
 
 impl Heatmap {
     pub fn new(bucket_secs: u64) -> Self {
         Self {
             bucket_secs,
-            cells: HashMap::new(),
+            cells: FxHashMap::default(),
         }
     }
 
@@ -78,7 +78,7 @@ impl Heatmap {
     }
 
     #[allow(dead_code)]
-    pub fn cells(&self) -> &HashMap<u64, HashMap<String, MetricSet>> {
+    pub fn cells(&self) -> &FxHashMap<u64, FxHashMap<String, MetricSet>> {
         &self.cells
     }
 

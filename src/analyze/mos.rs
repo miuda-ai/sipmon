@@ -3,21 +3,36 @@
 //! `R = 93.2 - Id(delay) - Ie-eff(codec, loss)`
 //! `MOS = 1 + 0.035*R + 7e-6 * R*(R-60)*(100-R)` for R<100; R>=100 -> 4.5.
 
+/// Case-insensitive ASCII substring test without allocating. Codec names are
+/// short, and this runs per MOS estimate (per stream per snapshot/sample) —
+/// the old `to_ascii_uppercase` allocated a String on every call.
+fn contains_ci(haystack: &str, needle: &str) -> bool {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    n.len() <= h.len() && h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+}
+
 /// Codec impairment parameters `(Ie, Bpl)` with packet-loss concealment
 /// (ITU-T G.107 Annex B typical values).
 fn codec_params(codec: Option<&str>, pt: Option<u8>) -> (f64, f64) {
-    let s = codec.map(|c| c.to_ascii_uppercase());
-    match (s.as_deref(), pt) {
-        (Some(c), _) if c.contains("PCMU") || c.contains("PCMA") || c.contains("G.711") => {
-            (0.0, 25.1)
+    // `""` contains no codec pattern, so a missing codec falls through to the
+    // payload-type arms — same behavior as the old Option-based match.
+    let c = codec.unwrap_or("");
+    if contains_ci(c, "PCMU") || contains_ci(c, "PCMA") || contains_ci(c, "G.711") {
+        (0.0, 25.1)
+    } else if contains_ci(c, "G.729") {
+        (10.0, 19.0)
+    } else if contains_ci(c, "G.723") {
+        (15.0, 13.0)
+    } else if contains_ci(c, "G.722") {
+        (4.0, 15.7)
+    } else if contains_ci(c, "OPUS") || contains_ci(c, "TELEPHONE") {
+        (0.0, 25.0)
+    } else {
+        match pt {
+            Some(0) | Some(8) => (0.0, 25.1),
+            _ => (10.0, 10.0),
         }
-        (Some(c), _) if c.contains("G.729") => (10.0, 19.0),
-        (Some(c), _) if c.contains("G.723") => (15.0, 13.0),
-        (Some(c), _) if c.contains("G.722") => (4.0, 15.7),
-        (Some(c), _) if c.contains("OPUS") => (0.0, 25.0),
-        (Some(c), _) if c.contains("TELEPHONE") => (0.0, 25.0),
-        (_, Some(0)) | (_, Some(8)) => (0.0, 25.1),
-        _ => (10.0, 10.0),
     }
 }
 
@@ -85,5 +100,24 @@ mod tests {
         let low = estimate_mos(Some("PCMU"), Some(0), 0.0, Some(50.0), None).unwrap();
         let high = estimate_mos(Some("PCMU"), Some(0), 0.0, Some(300.0), None).unwrap();
         assert!(high < low, "{high} should be < {low}");
+    }
+}
+
+#[cfg(test)]
+mod codec_match_tests {
+    use super::contains_ci;
+
+    #[test]
+    fn finds_case_insensitive_substring() {
+        assert!(contains_ci("audio PCMU/8000", "pcmu"));
+        assert!(contains_ci("g.711alaw", "G.711"));
+        assert!(contains_ci("telephone-event", "TELEPHONE"));
+    }
+
+    #[test]
+    fn no_match_and_empty_cases() {
+        assert!(!contains_ci("opus", "G.729"));
+        assert!(!contains_ci("", "OPUS"));
+        assert!(!contains_ci("op", "OPUS")); // needle longer than haystack
     }
 }

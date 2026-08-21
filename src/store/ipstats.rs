@@ -8,7 +8,7 @@
 //! short-term and long-term quality side by side. The 1s series also feeds the
 //! per-IP heatmap.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque; use rustc_hash::FxHashMap;
 use std::net::IpAddr;
 
 /// Loss-rate windows supported by the UI: (window_secs, label). 0 = all-time.
@@ -357,7 +357,7 @@ impl IpStats {
 /// All the per-IP stats, keyed by IP.
 #[derive(Debug, Clone, Default)]
 pub struct IpStatsStore {
-    map: HashMap<IpAddr, IpStats>,
+    map: FxHashMap<IpAddr, IpStats>,
 }
 
 impl IpStatsStore {

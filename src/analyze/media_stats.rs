@@ -38,7 +38,10 @@ pub struct MediaStatsAccumulator {
     pub clock_rate: Option<u32>,
     pub first_sequence: Option<u16>,
     pub last_sequence: Option<u16>,
-    pub pending_missing: std::collections::BTreeSet<u16>,
+    /// Pending (missing) sequence numbers inside the 64-packet reorder
+    /// window, as a bitmap relative to `last_sequence`: bit `age-1` set =
+    /// `last-age` has not arrived yet.
+    pub pending_mask: u64,
     pub prev_arrival_micros: Option<u64>,
     pub prev_rtp_timestamp: Option<u32>,
     pub jitter_rtp_units: f64,
@@ -113,49 +116,43 @@ impl MediaStatsAccumulator {
                 // Sender restart / SSRC+port reuse: booking thousands of
                 // packets lost off a single arrival would permanently inflate
                 // the cumulative loss rate. Reset tracking instead.
-                self.pending_missing.clear();
+                self.pending_mask = 0;
                 self.restarts += 1;
                 self.last_sequence = Some(seq);
                 return;
             }
-            if diff > 1 {
-                self.defer_missing(last, seq);
+            // Forward: `last` advances by `diff`. Each pending bit's age grows
+            // by `diff`; bits shifted past the 64-packet reorder window expire
+            // and count as loss. (A bitmap replaces the per-gap set inserts
+            // and the per-packet retain scan of the set-based version.)
+            let d = diff as u32;
+            if d >= 64 {
+                self.lost_packets += self.pending_mask.count_ones() as u64;
+                self.pending_mask = 0;
+            } else {
+                let expired = (self.pending_mask >> (64 - d)).count_ones();
+                self.lost_packets += expired as u64;
+                self.pending_mask <<= d;
+            }
+            // Defer the gap (last+1..seq-1) into the window. Skips beyond the
+            // window count as immediate loss.
+            let missing = (diff - 1) as u64;
+            let buffered = missing.min(RTP_REORDER_WINDOW as u64);
+            self.lost_packets += missing - buffered;
+            if buffered >= 64 {
+                self.pending_mask = u64::MAX;
+            } else {
+                self.pending_mask |= (1u64 << buffered) - 1;
             }
             self.last_sequence = Some(seq);
-            self.expire_missing();
         } else {
-            self.pending_missing.remove(&seq);
-        }
-    }
-
-    fn defer_missing(&mut self, prev: u16, cur: u16) {
-        let missing = cur.wrapping_sub(prev) - 1;
-        let buffered = missing.min(RTP_REORDER_WINDOW);
-        self.lost_packets += (missing - buffered) as u64;
-        let first_off = missing - buffered + 1;
-        for off in first_off..=missing {
-            self.pending_missing.insert(prev.wrapping_add(off));
-        }
-    }
-
-    fn expire_missing(&mut self) {
-        let Some(last) = self.last_sequence else {
-            return;
-        };
-        if self.pending_missing.is_empty() {
-            return;
-        }
-        let mut expired = 0u64;
-        self.pending_missing.retain(|s| {
-            let age = last.wrapping_sub(*s);
-            if age > RTP_REORDER_WINDOW && age < 0x8000 {
-                expired += 1;
-                false
-            } else {
-                true
+            // Reorder: seq arrived before `last`. If it sits inside the
+            // window, clear its pending bit (recovered, not lost).
+            let age = last.wrapping_sub(seq);
+            if age > 0 && age <= RTP_REORDER_WINDOW {
+                self.pending_mask &= !(1u64 << (age - 1));
             }
-        });
-        self.lost_packets += expired;
+        }
     }
 
     fn observe_jitter(&mut self, arrival_us: u64, rtp_ts: u32, clock_rate: u32) {
@@ -181,7 +178,7 @@ impl MediaStatsAccumulator {
     }
 
     pub fn snapshot(&self) -> MediaStats {
-        let lost = self.lost_packets + self.pending_missing.len() as u64;
+        let lost = self.lost_packets + self.pending_mask.count_ones() as u64;
         let expected = self.packet_count + lost;
         let loss_pct = if expected > 0 {
             lost as f64 / expected as f64 * 100.0
@@ -225,6 +222,40 @@ mod tests {
             rtp_timestamp: ts,
             ssrc: 1,
         }
+    }
+
+    #[test]
+    fn gap_overflow_counts_immediate_loss() {
+        let mut s = MediaStatsAccumulator::new();
+        s.observe(0, Some(hdr(10, 0)));
+        // diff 70: 69 skipped, 64 buffered + 5 immediate loss.
+        s.observe(1_000, Some(hdr(80, 0)));
+        let st = s.snapshot();
+        assert_eq!(st.packet_count, 2);
+        assert_eq!(st.lost_packets, 69);
+        assert_eq!(st.expected_packets, 71);
+    }
+
+    #[test]
+    fn pending_expires_after_window() {
+        let mut s = MediaStatsAccumulator::new();
+        s.observe(0, Some(hdr(10, 0)));
+        s.observe(1_000, Some(hdr(12, 0))); // gap at 11 (pending)
+        s.observe(2_000, Some(hdr(100, 0))); // big jump: 11 now beyond window
+        let st = s.snapshot();
+        // 87 gap (12..100) = 64 buffered + 23 immediate; 11 expired (+1).
+        assert_eq!(st.lost_packets, 88);
+        assert_eq!(st.expected_packets, 91);
+    }
+
+    #[test]
+    fn duplicate_packet_is_noop() {
+        let mut s = MediaStatsAccumulator::new();
+        s.observe(0, Some(hdr(10, 0)));
+        s.observe(1_000, Some(hdr(10, 0))); // diff 0
+        let st = s.snapshot();
+        assert_eq!(st.packet_count, 2);
+        assert_eq!(st.lost_packets, 0);
     }
 
     #[test]
