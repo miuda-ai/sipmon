@@ -87,8 +87,7 @@ RANLIB_BIN="zig ranlib"
   CC="zig cc -target $ZIG_TARGET" AR="$AR_BIN" RANLIB="$RANLIB_BIN" ./configure \
     --host="$HOST_TRIPLE" \
     --without-libnl --disable-dbus --disable-bluetooth --disable-usb \
-    --disable-manual --without-dag --without-septel --without-snf \
-    --disable-rdma --disable-srp \
+    --without-dag --without-septel --without-snf --disable-rdma \
     --with-pcap=linux \
     --prefix="$PREFIX"
   make -j"$JOBS"
