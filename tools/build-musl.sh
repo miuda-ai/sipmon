@@ -12,7 +12,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="${TARGET:-x86_64-unknown-linux-musl}"
-PCAP_VERSION="${PCAP_VERSION:-1.10.4}"
+PCAP_VERSION="${PCAP_VERSION:-1.10.5}"
 
 # Cache dir for a locally-built musl libpcap. Override with MUSL_PCAP_DIR.
 MUSL_PCAP_DIR="${MUSL_PCAP_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/sipmon/muspcap}"
