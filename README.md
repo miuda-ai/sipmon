@@ -25,6 +25,32 @@ analysis results (JSONL).
 - **Analysis**: PDD/setup/ring timing, hangup initiator (BYE, CANCEL, reject), per-IP loss over 1s…1h windows
 - **Export**: JSONL on exit or via `export`; `query` fetches a Call-ID flow for scripting
 
+## Installation
+
+Prebuilt static binaries are available for Linux on `x86_64` and `aarch64`.
+Install the latest release with:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/miuda-ai/sipmon/main/install.sh | sh
+```
+
+The installer detects the CPU architecture, downloads the matching GitHub Release
+asset, verifies its SHA256 checksum, and installs `sipmon` to `/usr/local/bin`.
+It uses `sudo` only when the destination is not writable.
+
+To install a specific version or a custom destination:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/miuda-ai/sipmon/main/install.sh | SIPMON_VERSION=v0.1.20 sh
+curl -fsSL https://raw.githubusercontent.com/miuda-ai/sipmon/main/install.sh | SIPMON_INSTALL_DIR="$HOME/.local/bin" sh
+```
+
+Alternatively, install from crates.io with Cargo:
+
+```sh
+cargo install sipmon
+```
+
 ## Quick start
 
 ```sh
